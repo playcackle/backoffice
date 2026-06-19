@@ -11,7 +11,6 @@ import {
 } from "@/lib/analytics"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 import { DateRangeFilter } from "@/components/dashboard/date-range-filter"
-import { BotFilter } from "@/components/dashboard/bot-filter"
 import { StatCard } from "@/components/dashboard/stat-card"
 import { UsersActivityChart } from "@/components/dashboard/users-activity-chart"
 import { EngagementChart } from "@/components/dashboard/engagement-chart"
@@ -125,17 +124,16 @@ function RecommendationCard({ growth }: { growth: GrowthInsights }) {
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string; bots?: string }>
+  searchParams: Promise<{ range?: string }>
 }) {
-  const { range, bots } = await searchParams
+  const { range } = await searchParams
   const window = getWindow(range)
-  const excludeBots = bots !== "include"
 
   let data: Awaited<ReturnType<typeof loadAll>> | null = null
   let error: string | null = null
 
   try {
-    data = await loadAll(range, excludeBots)
+    data = await loadAll(range)
   } catch (e) {
     error = e instanceof Error ? e.message : "Failed to load analytics."
   }
@@ -240,16 +238,7 @@ export default async function DashboardPage({
 
             <Section
               title="Question performance"
-              description={
-                data.questions.excludeBots
-                  ? "Based on real human submissions — bot activity is excluded"
-                  : "Including all submissions from both human players and bots"
-              }
-              action={
-                <Suspense fallback={null}>
-                  <BotFilter excludeBots={data.questions.excludeBots} />
-                </Suspense>
-              }
+              description="Based on real human submissions — bot activity is excluded"
             >
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 <StatCard label="Questions tracked" value={fmt(data.questions.totalSlotsTracked)} icon={Sparkles} />
@@ -257,7 +246,7 @@ export default async function DashboardPage({
                   label="Total attempts"
                   value={fmt(data.questions.totalAttempts)}
                   icon={Target}
-                  hint={data.questions.excludeBots ? "Human submissions only" : "Humans + bots"}
+                  hint="Human submissions only"
                 />
                 <StatCard label="Success rate" value={pct(data.questions.overallClaimRate)} icon={Activity} hint="Successful snaps per attempt" />
               </div>
@@ -274,13 +263,13 @@ export default async function DashboardPage({
   )
 }
 
-async function loadAll(range?: string, excludeBots = true) {
+async function loadAll(range?: string) {
   const window = getWindow(range)
   const [users, retention, topics, questions, growth] = await Promise.all([
     getUserMetrics(window),
     getRetentionMetrics(window),
     getTopicMetrics(window),
-    getQuestionMetrics(window, excludeBots),
+    getQuestionMetrics(window),
     getGrowthInsights(),
   ])
   return { users, retention, topics, questions, growth }
