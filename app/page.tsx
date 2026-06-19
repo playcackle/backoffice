@@ -1,4 +1,5 @@
-import { Suspense } from "react"
+import { Suspense, cache } from "react"
+import { unstable_cache } from "next/cache"
 import { Users, Activity, UserPlus, Repeat, Gamepad2, Target, CalendarClock, CalendarRange, Sparkles, Layers, Hash, Flame, AlertTriangle, Moon, Lightbulb } from "lucide-react"
 import {
   getUserMetrics,
@@ -8,6 +9,7 @@ import {
   getGrowthInsights,
   getWindow,
   type GrowthInsights,
+  type Window,
 } from "@/lib/analytics"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 import { DateRangeFilter } from "@/components/dashboard/date-range-filter"
@@ -129,15 +131,6 @@ export default async function DashboardPage({
   const { range } = await searchParams
   const window = getWindow(range)
 
-  let data: Awaited<ReturnType<typeof loadAll>> | null = null
-  let error: string | null = null
-
-  try {
-    data = await loadAll(range)
-  } catch (e) {
-    error = e instanceof Error ? e.message : "Failed to load analytics."
-  }
-
   return (
     <div className="min-h-screen">
       <DashboardHeader />
@@ -152,127 +145,271 @@ export default async function DashboardPage({
           </Suspense>
         </div>
 
-        {error ? (
-          <Card>
-            <CardContent className="p-6">
-              <p className="text-sm font-medium text-destructive">Could not load analytics</p>
-              <p className="mt-1 text-sm text-muted-foreground">{error}</p>
-            </CardContent>
-          </Card>
-        ) : data ? (
-          <div className="flex flex-col gap-8">
-            <Section title="Players" description="Unique and active users across your trivia game">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <StatCard label="Unique users today" value={fmt(data.users.dau)} icon={Activity} hint="Distinct players active in last 24h" />
-                <StatCard label="Unique users this week" value={fmt(data.users.wau)} icon={CalendarClock} hint="Distinct players active in last 7 days" />
-                <StatCard label="Unique users (30 days)" value={fmt(data.users.mau)} icon={CalendarRange} hint="Distinct players active in last 30 days" />
-                <StatCard label="Total players" value={fmt(data.users.totalUsers)} icon={Users} hint={`${fmt(data.users.botCount)} bots excluded`} />
-              </div>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-2">
-                <StatCard label="Active in range" value={fmt(data.users.activeInRange)} icon={Users} hint={`Distinct players seen in ${window.label.toLowerCase()}`} />
-                <StatCard label="New in range" value={fmt(data.users.newInRange)} icon={UserPlus} hint={`${fmt(data.users.newToday)} joined today`} />
-              </div>
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <UsersActivityChart data={data.users.signupSeries} />
-                <RoundsChart data={data.retention.roundsSeries} />
-              </div>
-            </Section>
+        {/* Each section streams independently: the shell + skeletons render
+            instantly (so the post-login redirect is immediate), then each
+            section fills in as its own computation finishes — light sections
+            first, the heavy question scan last — instead of blocking on one
+            big all-at-once batch. */}
+        <div key={window.preset} className="flex flex-col gap-8">
+          <Section title="Players" description="Unique and active users across your trivia game">
+            <Suspense fallback={<PlayersSkeleton />}>
+              <PlayersBody range={range} window={window} />
+            </Suspense>
+          </Section>
 
-            <Section title="Retention & engagement" description="How players come back and how deeply they play">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <StatCard label="Returning players" value={fmt(data.retention.returningUsers)} icon={Repeat} hint={`${pct(data.retention.returnRate)} return rate`} />
-                <StatCard label="Avg games / player" value={dec(data.retention.avgGamesPlayed)} icon={Gamepad2} />
-                <StatCard label="Avg rounds / player" value={dec(data.retention.avgRoundsPlayed)} icon={Target} />
-                <StatCard label="Avg slots / player" value={dec(data.retention.avgSlotsSnapped)} icon={Sparkles} />
-              </div>
-              <EngagementChart data={data.retention.engagementBuckets} />
-            </Section>
+          <Section title="Retention & engagement" description="How players come back and how deeply they play">
+            <Suspense fallback={<RetentionSkeleton />}>
+              <RetentionBody range={range} />
+            </Suspense>
+          </Section>
 
-            <Section
-              title="Growth & retention insights"
-              description="Actionable signals for keeping players and growing the base. These reflect the current state of all players, independent of the date range."
-            >
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <StatCard
-                  label="Stickiness (DAU/MAU)"
-                  value={pct(data.growth.stickiness)}
-                  icon={Flame}
-                  hint={stickinessVerdict(data.growth.stickiness)}
-                />
-                <StatCard
-                  label="Weekly stickiness"
-                  value={pct(data.growth.weeklyStickiness)}
-                  icon={Activity}
-                  hint="Daily actives among weekly actives"
-                />
-                <StatCard
-                  label="Win-back targets"
-                  value={fmt(data.growth.winBackCount)}
-                  icon={AlertTriangle}
-                  hint="Engaged players quiet for 2–4 weeks"
-                />
-                <StatCard
-                  label="Dormant valuable"
-                  value={fmt(data.growth.dormantValuable)}
-                  icon={Moon}
-                  hint="High-activity players gone 30+ days"
-                />
-              </div>
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <RetentionFunnel data={data.growth.retention} />
-                <div className="flex items-stretch">
-                  <RecommendationCard growth={data.growth} />
-                </div>
-              </div>
-              <LifecycleSegments segments={data.growth.segments} />
-            </Section>
+          <Section
+            title="Growth & retention insights"
+            description="Actionable signals for keeping players and growing the base. These reflect the current state of all players, independent of the date range."
+          >
+            <Suspense fallback={<GrowthSkeleton />}>
+              <GrowthBody />
+            </Suspense>
+          </Section>
 
-            <Section title="Topics" description="Which trivia topics players spend their rounds on">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <StatCard label="Topics played" value={fmt(data.topics.totalTopics)} icon={Layers} />
-                <StatCard label="Rounds in range" value={fmt(data.topics.totalRounds)} icon={Hash} />
-                <StatCard label="Top topic" value={data.topics.topTopic ?? "—"} icon={Sparkles} />
-              </div>
-              <TopicBreakdown topics={data.topics.topics} />
-            </Section>
+          <Section title="Topics" description="Which trivia topics players spend their rounds on">
+            <Suspense fallback={<TopicsSkeleton />}>
+              <TopicsBody range={range} />
+            </Suspense>
+          </Section>
 
-            <Section
-              title="Question performance"
-              description="Based on real human submissions — bot activity is excluded"
-            >
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <StatCard label="Questions tracked" value={fmt(data.questions.totalSlotsTracked)} icon={Sparkles} />
-                <StatCard
-                  label="Total attempts"
-                  value={fmt(data.questions.totalAttempts)}
-                  icon={Target}
-                  hint="Human submissions only"
-                />
-                <StatCard label="Success rate" value={pct(data.questions.overallClaimRate)} icon={Activity} hint="Successful snaps per attempt" />
-              </div>
-              <QuestionsTable
-                hardest={data.questions.hardest}
-                easiest={data.questions.easiest}
-                mostAttempted={data.questions.mostAttempted}
-              />
-            </Section>
-          </div>
-        ) : null}
+          <Section
+            title="Question performance"
+            description="Based on real human submissions — bot activity is excluded"
+          >
+            <Suspense fallback={<QuestionsSkeleton />}>
+              <QuestionsBody range={range} />
+            </Suspense>
+          </Section>
+        </div>
       </main>
     </div>
   )
 }
 
-async function loadAll(range?: string) {
-  const window = getWindow(range)
-  const [users, retention, topics, questions, growth] = await Promise.all([
-    getUserMetrics(window),
-    getRetentionMetrics(window),
-    getTopicMetrics(window),
-    getQuestionMetrics(window),
-    getGrowthInsights(),
-  ])
-  return { users, retention, topics, questions, growth }
+// ---------------------------------------------------------------------------
+// Per-metric loaders. Each is independently cached so a section only waits on
+// its own query. `cache` dedupes within a request; `unstable_cache` persists
+// across requests (5 min) so repeat loads and navigation are near-instant.
+// ---------------------------------------------------------------------------
+const loadUsers = cache((range?: string) =>
+  unstable_cache(async () => getUserMetrics(getWindow(range)), ["m-users", range ?? "all"], { revalidate: 300 })(),
+)
+const loadRetention = cache((range?: string) =>
+  unstable_cache(async () => getRetentionMetrics(getWindow(range)), ["m-retention", range ?? "all"], { revalidate: 300 })(),
+)
+const loadTopics = cache((range?: string) =>
+  unstable_cache(async () => getTopicMetrics(getWindow(range)), ["m-topics", range ?? "all"], { revalidate: 300 })(),
+)
+const loadQuestions = cache((range?: string) =>
+  unstable_cache(async () => getQuestionMetrics(getWindow(range)), ["m-questions", range ?? "all"], { revalidate: 300 })(),
+)
+const loadGrowth = cache(() =>
+  unstable_cache(async () => getGrowthInsights(), ["m-growth"], { revalidate: 300 })(),
+)
+
+function SectionError({ message }: { message: string }) {
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <p className="text-sm font-medium text-destructive">Could not load this section</p>
+        <p className="mt-1 text-sm text-muted-foreground">{message}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+async function PlayersBody({ range, window }: { range?: string; window: Window }) {
+  try {
+    const [users, retention] = await Promise.all([loadUsers(range), loadRetention(range)])
+    return (
+      <>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <StatCard label="Unique users today" value={fmt(users.dau)} icon={Activity} hint="Distinct players active in last 24h" />
+          <StatCard label="Unique users this week" value={fmt(users.wau)} icon={CalendarClock} hint="Distinct players active in last 7 days" />
+          <StatCard label="Unique users (30 days)" value={fmt(users.mau)} icon={CalendarRange} hint="Distinct players active in last 30 days" />
+          <StatCard label="Total players" value={fmt(users.totalUsers)} icon={Users} hint={`${fmt(users.botCount)} bots excluded`} />
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-2">
+          <StatCard label="Active in range" value={fmt(users.activeInRange)} icon={Users} hint={`Distinct players seen in ${window.label.toLowerCase()}`} />
+          <StatCard label="New in range" value={fmt(users.newInRange)} icon={UserPlus} hint={`${fmt(users.newToday)} joined today`} />
+        </div>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <UsersActivityChart data={users.signupSeries} />
+          <RoundsChart data={retention.roundsSeries} />
+        </div>
+      </>
+    )
+  } catch (e) {
+    return <SectionError message={e instanceof Error ? e.message : "Failed to load players."} />
+  }
+}
+
+async function RetentionBody({ range }: { range?: string }) {
+  try {
+    const retention = await loadRetention(range)
+    return (
+      <>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <StatCard label="Returning players" value={fmt(retention.returningUsers)} icon={Repeat} hint={`${pct(retention.returnRate)} return rate`} />
+          <StatCard label="Avg games / player" value={dec(retention.avgGamesPlayed)} icon={Gamepad2} />
+          <StatCard label="Avg rounds / player" value={dec(retention.avgRoundsPlayed)} icon={Target} />
+          <StatCard label="Avg slots / player" value={dec(retention.avgSlotsSnapped)} icon={Sparkles} />
+        </div>
+        <EngagementChart data={retention.engagementBuckets} />
+      </>
+    )
+  } catch (e) {
+    return <SectionError message={e instanceof Error ? e.message : "Failed to load retention."} />
+  }
+}
+
+async function GrowthBody() {
+  try {
+    const growth = await loadGrowth()
+    return (
+      <>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <StatCard label="Stickiness (DAU/MAU)" value={pct(growth.stickiness)} icon={Flame} hint={stickinessVerdict(growth.stickiness)} />
+          <StatCard label="Weekly stickiness" value={pct(growth.weeklyStickiness)} icon={Activity} hint="Daily actives among weekly actives" />
+          <StatCard label="Win-back targets" value={fmt(growth.winBackCount)} icon={AlertTriangle} hint="Engaged players quiet for 2–4 weeks" />
+          <StatCard label="Dormant valuable" value={fmt(growth.dormantValuable)} icon={Moon} hint="High-activity players gone 30+ days" />
+        </div>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <RetentionFunnel data={growth.retention} />
+          <div className="flex items-stretch">
+            <RecommendationCard growth={growth} />
+          </div>
+        </div>
+        <LifecycleSegments segments={growth.segments} />
+      </>
+    )
+  } catch (e) {
+    return <SectionError message={e instanceof Error ? e.message : "Failed to load growth insights."} />
+  }
+}
+
+async function TopicsBody({ range }: { range?: string }) {
+  try {
+    const topics = await loadTopics(range)
+    return (
+      <>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <StatCard label="Topics played" value={fmt(topics.totalTopics)} icon={Layers} />
+          <StatCard label="Rounds in range" value={fmt(topics.totalRounds)} icon={Hash} />
+          <StatCard label="Top topic" value={topics.topTopic ?? "—"} icon={Sparkles} />
+        </div>
+        <TopicBreakdown topics={topics.topics} />
+      </>
+    )
+  } catch (e) {
+    return <SectionError message={e instanceof Error ? e.message : "Failed to load topics."} />
+  }
+}
+
+async function QuestionsBody({ range }: { range?: string }) {
+  try {
+    const questions = await loadQuestions(range)
+    return (
+      <>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <StatCard label="Questions tracked" value={fmt(questions.totalSlotsTracked)} icon={Sparkles} />
+          <StatCard label="Total attempts" value={fmt(questions.totalAttempts)} icon={Target} hint="Human submissions only" />
+          <StatCard label="Success rate" value={pct(questions.overallClaimRate)} icon={Activity} hint="Successful snaps per attempt" />
+        </div>
+        <QuestionsTable hardest={questions.hardest} easiest={questions.easiest} mostAttempted={questions.mostAttempted} />
+      </>
+    )
+  } catch (e) {
+    return <SectionError message={e instanceof Error ? e.message : "Failed to load question performance."} />
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Skeletons — shown per section while its data streams in.
+// ---------------------------------------------------------------------------
+function StatGridSkeleton({ count = 4, cols = 4 }: { count?: number; cols?: 3 | 4 }) {
+  return (
+    <div className={`grid grid-cols-1 gap-4 sm:grid-cols-2 ${cols === 3 ? "lg:grid-cols-3" : "lg:grid-cols-4"}`}>
+      {Array.from({ length: count }).map((_, i) => (
+        <Card key={i}>
+          <CardContent className="flex flex-col gap-3 p-6">
+            <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+            <div className="h-8 w-16 animate-pulse rounded bg-muted" />
+            <div className="h-3 w-28 animate-pulse rounded bg-muted" />
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  )
+}
+
+function BlockSkeleton({ height = "h-56" }: { height?: string }) {
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <div className={`w-full animate-pulse rounded bg-muted ${height}`} />
+      </CardContent>
+    </Card>
+  )
+}
+
+function PlayersSkeleton() {
+  return (
+    <div className="flex flex-col gap-4" aria-busy="true">
+      <StatGridSkeleton count={4} />
+      <StatGridSkeleton count={2} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <BlockSkeleton />
+        <BlockSkeleton />
+      </div>
+    </div>
+  )
+}
+
+function RetentionSkeleton() {
+  return (
+    <div className="flex flex-col gap-4" aria-busy="true">
+      <StatGridSkeleton count={4} />
+      <BlockSkeleton />
+    </div>
+  )
+}
+
+function GrowthSkeleton() {
+  return (
+    <div className="flex flex-col gap-4" aria-busy="true">
+      <StatGridSkeleton count={4} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <BlockSkeleton />
+        <BlockSkeleton />
+      </div>
+      <BlockSkeleton height="h-40" />
+    </div>
+  )
+}
+
+function TopicsSkeleton() {
+  return (
+    <div className="flex flex-col gap-4" aria-busy="true">
+      <StatGridSkeleton count={3} cols={3} />
+      <BlockSkeleton />
+    </div>
+  )
+}
+
+function QuestionsSkeleton() {
+  return (
+    <div className="flex flex-col gap-4" aria-busy="true">
+      <StatGridSkeleton count={3} cols={3} />
+      <BlockSkeleton height="h-72" />
+    </div>
+  )
 }
 
 function Section({
