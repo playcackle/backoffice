@@ -10,7 +10,7 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: 'Trivia Back Office',
+  title: 'Cackle Back Office',
   description: 'Analytics portal for tracking trivia quiz players, retention, and question performance.',
   generator: 'v0.app',
   icons: {
