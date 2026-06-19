@@ -14,7 +14,7 @@ export function UsersActivityChart({ data }: { data: { date: string; signups: nu
     <Card>
       <CardHeader>
         <CardTitle>User activity</CardTitle>
-        <CardDescription>Daily active users and new signups over the last 30 days</CardDescription>
+        <CardDescription>Active users and new signups over the selected range</CardDescription>
       </CardHeader>
       <CardContent>
         <ChartContainer config={config} className="h-[280px] w-full">
