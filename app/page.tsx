@@ -1,5 +1,5 @@
 import { Suspense } from "react"
-import { Users, Activity, UserPlus, Repeat, Gamepad2, Target, CalendarClock, Sparkles, Layers, Hash } from "lucide-react"
+import { Users, Activity, UserPlus, Repeat, Gamepad2, Target, CalendarClock, CalendarRange, Sparkles, Layers, Hash } from "lucide-react"
 import {
   getUserMetrics,
   getRetentionMetrics,
@@ -73,10 +73,14 @@ export default async function DashboardPage({
           <div className="flex flex-col gap-8">
             <Section title="Players" description="Unique and active users across your trivia game">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <StatCard label="Unique users today" value={fmt(data.users.dau)} icon={Activity} hint="Distinct players active in last 24h" />
+                <StatCard label="Unique users this week" value={fmt(data.users.wau)} icon={CalendarClock} hint="Distinct players active in last 7 days" />
+                <StatCard label="Unique users (30 days)" value={fmt(data.users.mau)} icon={CalendarRange} hint="Distinct players active in last 30 days" />
                 <StatCard label="Total players" value={fmt(data.users.totalUsers)} icon={Users} hint={`${fmt(data.users.botCount)} bots excluded`} />
-                <StatCard label="Active in range" value={fmt(data.users.activeInRange)} icon={Activity} hint={`${fmt(data.users.dau)} active today`} />
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-2">
+                <StatCard label="Active in range" value={fmt(data.users.activeInRange)} icon={Users} hint={`Distinct players seen in ${window.label.toLowerCase()}`} />
                 <StatCard label="New in range" value={fmt(data.users.newInRange)} icon={UserPlus} hint={`${fmt(data.users.newToday)} joined today`} />
-                <StatCard label="Weekly active" value={fmt(data.users.wau)} icon={CalendarClock} hint="Seen in last 7 days" />
               </div>
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <UsersActivityChart data={data.users.signupSeries} />
@@ -89,7 +93,7 @@ export default async function DashboardPage({
                 <StatCard label="Returning players" value={fmt(data.retention.returningUsers)} icon={Repeat} hint={`${pct(data.retention.returnRate)} return rate`} />
                 <StatCard label="Avg games / player" value={dec(data.retention.avgGamesPlayed)} icon={Gamepad2} />
                 <StatCard label="Avg rounds / player" value={dec(data.retention.avgRoundsPlayed)} icon={Target} />
-                <StatCard label="Monthly active" value={fmt(data.users.mau)} icon={Activity} hint="Seen in last 30 days" />
+                <StatCard label="Avg slots / player" value={dec(data.retention.avgSlotsSnapped)} icon={Sparkles} />
               </div>
               <EngagementChart data={data.retention.engagementBuckets} />
             </Section>
