@@ -218,6 +218,205 @@ export async function getUserMetrics(w: Window): Promise<UserMetrics> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Growth & retention insights
+//
+// Patterns drawn from established product-analytics practice:
+//   - Stickiness (DAU/MAU): the canonical habit-formation signal.
+//   - Lifecycle / RFM-lite segmentation (Recency + Frequency): turns the user
+//     base into actionable cohorts (champions, loyal, at-risk, etc.).
+//   - D1/D7/D30 retention: the highest-leverage diagnostic for where players
+//     drop off. Approximated from each player's lifespan
+//     (last_seen_active_at - created_at), measured only against players old
+//     enough to have had the chance to reach each milestone.
+//   - Win-back targeting: valuable players who have gone quiet — the prime
+//     candidates for re-engagement.
+//
+// These describe the current state of the user base, so (like DAU/WAU/MAU)
+// they intentionally ignore the dashboard date-range filter.
+// ---------------------------------------------------------------------------
+
+export type LifecycleSegment = {
+  key: string
+  label: string
+  players: number
+  share: number
+  description: string
+  action: string
+  tone: "positive" | "neutral" | "warning" | "danger"
+}
+
+export type RetentionMilestone = {
+  label: string
+  rate: number
+  retained: number
+  eligible: number
+}
+
+export type GrowthInsights = {
+  dau: number
+  wau: number
+  mau: number
+  stickiness: number // DAU / MAU
+  weeklyStickiness: number // DAU / WAU
+  segments: LifecycleSegment[]
+  retention: RetentionMilestone[]
+  winBackCount: number
+  dormantValuable: number
+  totalActiveBase: number
+}
+
+export async function getGrowthInsights(): Promise<GrowthInsights> {
+  const players = await fetchAll<PlayerRow>(
+    "player",
+    "id,created_at,last_seen_active_at,games_played,is_bot",
+  )
+  const humans = players.filter((p) => !p.is_bot)
+  const now = Date.now()
+
+  let dau = 0
+  let wau = 0
+  let mau = 0
+
+  const segCounts = {
+    champions: 0,
+    loyal: 0,
+    casual: 0,
+    atRisk: 0,
+    newcomers: 0,
+    dormant: 0,
+  }
+
+  // Retention milestone tallies. `eligible` only counts players old enough to
+  // have had the opportunity to reach the milestone.
+  const milestones = [
+    { label: "Day 1", minLifespan: 1, retained: 0, eligible: 0 },
+    { label: "Day 7", minLifespan: 7, retained: 0, eligible: 0 },
+    { label: "Day 30", minLifespan: 30, retained: 0, eligible: 0 },
+  ]
+
+  let winBackCount = 0
+  let dormantValuable = 0
+
+  for (const p of humans) {
+    const seen = parseTs(p.last_seen_active_at)
+    const created = parseTs(p.created_at)
+    const games = p.games_played ?? 0
+
+    const recencyDays = seen === null ? Infinity : (now - seen) / DAY_MS
+    const ageDays = created === null ? 0 : (now - created) / DAY_MS
+
+    if (recencyDays <= 1) dau++
+    if (recencyDays <= 7) wau++
+    if (recencyDays <= 30) mau++
+
+    // Lifecycle segmentation (mutually exclusive, evaluated by priority).
+    if (recencyDays > 30) {
+      segCounts.dormant++
+      if (games >= 6) dormantValuable++
+    } else if (recencyDays <= 7 && games >= 6) {
+      segCounts.champions++
+    } else if (recencyDays <= 14 && games >= 2) {
+      segCounts.loyal++
+    } else if (recencyDays > 14 && games >= 2) {
+      segCounts.atRisk++
+      winBackCount++
+    } else if (ageDays <= 7 && games <= 1) {
+      segCounts.newcomers++
+    } else {
+      segCounts.casual++
+    }
+
+    // Retention milestones via lifespan.
+    if (created !== null) {
+      const lifespanDays = seen !== null ? (seen - created) / DAY_MS : 0
+      for (const m of milestones) {
+        if (ageDays >= m.minLifespan) {
+          m.eligible++
+          if (lifespanDays >= m.minLifespan) m.retained++
+        }
+      }
+    }
+  }
+
+  const total = humans.length || 1
+
+  const segments: LifecycleSegment[] = [
+    {
+      key: "champions",
+      label: "Champions",
+      players: segCounts.champions,
+      share: segCounts.champions / total,
+      description: "Recently active and play often.",
+      action: "Reward them and prompt referrals — they fuel word-of-mouth growth.",
+      tone: "positive",
+    },
+    {
+      key: "loyal",
+      label: "Loyal",
+      players: segCounts.loyal,
+      share: segCounts.loyal / total,
+      description: "Return regularly with steady play.",
+      action: "Surface fresh topics and streaks to deepen the habit.",
+      tone: "positive",
+    },
+    {
+      key: "newcomers",
+      label: "Newcomers",
+      players: segCounts.newcomers,
+      share: segCounts.newcomers / total,
+      description: "Joined in the last week but barely played.",
+      action: "Nudge toward a 2nd and 3rd game — the strongest retention lever.",
+      tone: "neutral",
+    },
+    {
+      key: "casual",
+      label: "Casual",
+      players: segCounts.casual,
+      share: segCounts.casual / total,
+      description: "Active but low frequency.",
+      action: "Add daily challenges or streaks to build a routine.",
+      tone: "neutral",
+    },
+    {
+      key: "atRisk",
+      label: "At-risk",
+      players: segCounts.atRisk,
+      share: segCounts.atRisk / total,
+      description: "Were engaged but quiet for 2–4 weeks.",
+      action: "Send a personalized win-back before they churn.",
+      tone: "warning",
+    },
+    {
+      key: "dormant",
+      label: "Dormant",
+      players: segCounts.dormant,
+      share: segCounts.dormant / total,
+      description: "No activity for over 30 days.",
+      action: "Run a 'we miss you' reactivation campaign with a hook.",
+      tone: "danger",
+    },
+  ]
+
+  return {
+    dau,
+    wau,
+    mau,
+    stickiness: mau ? dau / mau : 0,
+    weeklyStickiness: wau ? dau / wau : 0,
+    segments,
+    retention: milestones.map((m) => ({
+      label: m.label,
+      rate: m.eligible ? m.retained / m.eligible : 0,
+      retained: m.retained,
+      eligible: m.eligible,
+    })),
+    winBackCount,
+    dormantValuable,
+    totalActiveBase: mau,
+  }
+}
+
 export type RetentionMetrics = {
   returningUsers: number
   returnRate: number
