@@ -1,4 +1,5 @@
 import { Suspense } from "react"
+import { unstable_cache } from "next/cache"
 import { Users, Activity, UserPlus, Repeat, Gamepad2, Target, CalendarClock, CalendarRange, Sparkles, Layers, Hash, Flame, AlertTriangle, Moon, Lightbulb } from "lucide-react"
 import {
   getUserMetrics,
@@ -8,6 +9,7 @@ import {
   getGrowthInsights,
   getWindow,
   type GrowthInsights,
+  type Window,
 } from "@/lib/analytics"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 import { DateRangeFilter } from "@/components/dashboard/date-range-filter"
@@ -129,15 +131,6 @@ export default async function DashboardPage({
   const { range } = await searchParams
   const window = getWindow(range)
 
-  let data: Awaited<ReturnType<typeof loadAll>> | null = null
-  let error: string | null = null
-
-  try {
-    data = await loadAll(range)
-  } catch (e) {
-    error = e instanceof Error ? e.message : "Failed to load analytics."
-  }
-
   return (
     <div className="min-h-screen">
       <DashboardHeader />
@@ -152,14 +145,40 @@ export default async function DashboardPage({
           </Suspense>
         </div>
 
-        {error ? (
-          <Card>
-            <CardContent className="p-6">
-              <p className="text-sm font-medium text-destructive">Could not load analytics</p>
-              <p className="mt-1 text-sm text-muted-foreground">{error}</p>
-            </CardContent>
-          </Card>
-        ) : data ? (
+        {/* Stream the heavy analytics so the page shell (and post-login redirect)
+            renders instantly, with a skeleton while data loads. */}
+        <Suspense key={window.preset} fallback={<DashboardSkeleton />}>
+          <DashboardContent range={range} window={window} />
+        </Suspense>
+      </main>
+    </div>
+  )
+}
+
+async function DashboardContent({ range, window }: { range?: string; window: Window }) {
+  let data: Awaited<ReturnType<typeof loadAll>> | null = null
+  let error: string | null = null
+
+  try {
+    data = await loadDashboardData(range)
+  } catch (e) {
+    error = e instanceof Error ? e.message : "Failed to load analytics."
+  }
+
+  if (error) {
+    return (
+      <Card>
+        <CardContent className="p-6">
+          <p className="text-sm font-medium text-destructive">Could not load analytics</p>
+          <p className="mt-1 text-sm text-muted-foreground">{error}</p>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (!data) return null
+
+  return (
           <div className="flex flex-col gap-8">
             <Section title="Players" description="Unique and active users across your trivia game">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -257,10 +276,17 @@ export default async function DashboardPage({
               />
             </Section>
           </div>
-        ) : null}
-      </main>
-    </div>
   )
+}
+
+// Cache the expensive aggregation across requests so the dashboard (and the
+// post-login redirect to it) is fast. Keyed per range; revalidated every 5 min.
+function loadDashboardData(range?: string) {
+  return unstable_cache(
+    async () => loadAll(range),
+    ["dashboard-data", range ?? "all"],
+    { revalidate: 300 },
+  )()
 }
 
 async function loadAll(range?: string) {
@@ -273,6 +299,37 @@ async function loadAll(range?: string) {
     getGrowthInsights(),
   ])
   return { users, retention, topics, questions, growth }
+}
+
+function DashboardSkeleton() {
+  return (
+    <div className="flex flex-col gap-8" aria-busy="true" aria-label="Loading analytics">
+      {[0, 1, 2].map((section) => (
+        <section key={section} className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <div className="h-5 w-48 animate-pulse rounded bg-muted" />
+            <div className="h-4 w-72 animate-pulse rounded bg-muted" />
+          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[0, 1, 2, 3].map((card) => (
+              <Card key={card}>
+                <CardContent className="flex flex-col gap-3 p-6">
+                  <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+                  <div className="h-8 w-16 animate-pulse rounded bg-muted" />
+                  <div className="h-3 w-28 animate-pulse rounded bg-muted" />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+          <Card>
+            <CardContent className="p-6">
+              <div className="h-56 w-full animate-pulse rounded bg-muted" />
+            </CardContent>
+          </Card>
+        </section>
+      ))}
+    </div>
+  )
 }
 
 function Section({
