@@ -21,14 +21,23 @@ type RoundRow = {
   game_session_id: string | null
 }
 
-type SlotAnalyticsRow = {
+type SlotRow = {
+  id: number
   canonical_text: string | null
-  slot_id: number | null
   is_rare: boolean | null
-  is_claimed: boolean | null
-  total_attempts: number | null
-  failed_attempts: number | null
-  unique_attemptors: number | null
+}
+
+// A single submission inside playerroundanalytics.attempts (jsonb array).
+type AttemptEntry = {
+  slot_id?: number | null
+  result?: string | null
+  is_rare?: boolean | null
+}
+
+type PlayerRoundRow = {
+  player_id: string | null
+  round_analytics_id: number | null
+  attempts: AttemptEntry[] | null
   created_at: string | null
 }
 
@@ -351,68 +360,103 @@ export type QuestionMetrics = {
   totalSlotsTracked: number
   totalAttempts: number
   overallClaimRate: number
+  excludeBots: boolean
+  botRowsExcluded: number
   hardest: QuestionStat[]
   easiest: QuestionStat[]
   mostAttempted: QuestionStat[]
 }
 
-export async function getQuestionMetrics(w: Window): Promise<QuestionMetrics> {
-  const rows = await fetchAll<SlotAnalyticsRow>(
-    "slotanalytics",
-    "canonical_text,slot_id,is_rare,is_claimed,total_attempts,failed_attempts,unique_attemptors,created_at",
-  )
+// Question performance is computed from per-player submissions in
+// `playerroundanalytics` rather than the pre-aggregated `slotanalytics` table.
+// This is the only source that ties each attempt back to a player, which lets
+// us exclude bot-generated activity. The aggregate `slotanalytics` counts blend
+// bots and humans with no way to separate them.
+export async function getQuestionMetrics(w: Window, excludeBots = true): Promise<QuestionMetrics> {
+  const [players, slots, rows] = await Promise.all([
+    fetchAll<PlayerRow>("player", "id,is_bot"),
+    fetchAll<SlotRow>("slot", "id,canonical_text,is_rare"),
+    fetchAll<PlayerRoundRow>("playerroundanalytics", "player_id,round_analytics_id,attempts,created_at"),
+  ])
+
+  const botById = new Map(players.map((p) => [p.id, !!p.is_bot]))
+  const slotById = new Map(slots.map((s) => [s.id, s]))
 
   type Agg = {
     text: string
     attempts: number
     failed: number
-    claimed: number
-    appearances: number
-    uniqueAttemptors: number
+    appearances: Set<number>
+    attemptors: Set<string>
+    solvers: Set<string>
     isRare: boolean
   }
-  const map = new Map<string, Agg>()
+  const map = new Map<number, Agg>()
 
   let totalAttempts = 0
-  let totalClaimed = 0
-  let consideredRows = 0
+  let totalSuccesses = 0
+  let botRowsExcluded = 0
 
   for (const r of rows) {
     const ms = parseTs(r.created_at)
-    // Slot analytics rows carry a created_at; honor the window when present.
     if (r.created_at && !inWindow(ms, w)) continue
-    consideredRows++
-    const text = (r.canonical_text ?? "").trim() || `Slot #${r.slot_id ?? "?"}`
-    const key = text.toLowerCase()
-    const agg =
-      map.get(key) ??
-      { text, attempts: 0, failed: 0, claimed: 0, appearances: 0, uniqueAttemptors: 0, isRare: false }
 
-    agg.attempts += r.total_attempts ?? 0
-    agg.failed += r.failed_attempts ?? 0
-    agg.claimed += r.is_claimed ? 1 : 0
-    agg.appearances += 1
-    agg.uniqueAttemptors += r.unique_attemptors ?? 0
-    agg.isRare = agg.isRare || !!r.is_rare
+    const playerId = r.player_id ?? ""
+    const isBot = botById.get(playerId) ?? false
+    if (excludeBots && isBot) {
+      botRowsExcluded++
+      continue
+    }
+    if (!Array.isArray(r.attempts)) continue
 
-    totalAttempts += r.total_attempts ?? 0
-    totalClaimed += r.is_claimed ? 1 : 0
-    map.set(key, agg)
+    for (const a of r.attempts) {
+      const slotId = a?.slot_id
+      if (slotId === null || slotId === undefined) continue
+
+      const slot = slotById.get(slotId)
+      const text = (slot?.canonical_text ?? "").trim() || `Slot #${slotId}`
+      const success = (a?.result ?? "").toUpperCase() === "SUCCESS"
+
+      const agg =
+        map.get(slotId) ??
+        {
+          text,
+          attempts: 0,
+          failed: 0,
+          appearances: new Set<number>(),
+          attemptors: new Set<string>(),
+          solvers: new Set<string>(),
+          isRare: !!(slot?.is_rare ?? a?.is_rare),
+        }
+
+      agg.attempts += 1
+      if (!success) agg.failed += 1
+      else if (playerId) agg.solvers.add(playerId)
+      if (playerId) agg.attemptors.add(playerId)
+      if (r.round_analytics_id !== null && r.round_analytics_id !== undefined) {
+        agg.appearances.add(r.round_analytics_id)
+      }
+      map.set(slotId, agg)
+
+      totalAttempts += 1
+      if (success) totalSuccesses += 1
+    }
   }
 
   const stats: QuestionStat[] = Array.from(map.values()).map((a) => ({
     text: a.text,
     attempts: a.attempts,
     failed: a.failed,
-    claimRate: a.appearances ? a.claimed / a.appearances : 0,
+    claimRate: a.attemptors.size ? a.solvers.size / a.attemptors.size : 0,
     failRate: a.attempts ? a.failed / a.attempts : 0,
-    uniqueAttemptors: a.uniqueAttemptors,
-    appearances: a.appearances,
+    uniqueAttemptors: a.attemptors.size,
+    appearances: a.appearances.size,
     isRare: a.isRare,
   }))
 
-  // Only rank questions that have been seen enough to be meaningful.
-  const ranked = stats.filter((s) => s.appearances >= 3)
+  // Only rank questions that at least a couple of players actually attempted,
+  // so single-attempt outliers don't dominate the hardest/easiest lists.
+  const ranked = stats.filter((s) => s.uniqueAttemptors >= 2)
 
   const hardest = [...ranked].sort((a, b) => b.failRate - a.failRate || b.attempts - a.attempts).slice(0, 10)
   const easiest = [...ranked].sort((a, b) => b.claimRate - a.claimRate || a.failRate - b.failRate).slice(0, 10)
@@ -421,7 +465,9 @@ export async function getQuestionMetrics(w: Window): Promise<QuestionMetrics> {
   return {
     totalSlotsTracked: map.size,
     totalAttempts,
-    overallClaimRate: consideredRows ? totalClaimed / consideredRows : 0,
+    overallClaimRate: totalAttempts ? totalSuccesses / totalAttempts : 0,
+    excludeBots,
+    botRowsExcluded,
     hardest,
     easiest,
     mostAttempted,

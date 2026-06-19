@@ -9,6 +9,7 @@ import {
 } from "@/lib/analytics"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 import { DateRangeFilter } from "@/components/dashboard/date-range-filter"
+import { BotFilter } from "@/components/dashboard/bot-filter"
 import { StatCard } from "@/components/dashboard/stat-card"
 import { UsersActivityChart } from "@/components/dashboard/users-activity-chart"
 import { EngagementChart } from "@/components/dashboard/engagement-chart"
@@ -34,16 +35,17 @@ function dec(n: number) {
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string }>
+  searchParams: Promise<{ range?: string; bots?: string }>
 }) {
-  const { range } = await searchParams
+  const { range, bots } = await searchParams
   const window = getWindow(range)
+  const excludeBots = bots !== "include"
 
   let data: Awaited<ReturnType<typeof loadAll>> | null = null
   let error: string | null = null
 
   try {
-    data = await loadAll(range)
+    data = await loadAll(range, excludeBots)
   } catch (e) {
     error = e instanceof Error ? e.message : "Failed to load analytics."
   }
@@ -107,11 +109,28 @@ export default async function DashboardPage({
               <TopicBreakdown topics={data.topics.topics} />
             </Section>
 
-            <Section title="Question performance" description="Which questions challenge or stump your players">
+            <Section
+              title="Question performance"
+              description={
+                data.questions.excludeBots
+                  ? "Based on real human submissions — bot activity is excluded"
+                  : "Including all submissions from both human players and bots"
+              }
+              action={
+                <Suspense fallback={null}>
+                  <BotFilter excludeBots={data.questions.excludeBots} />
+                </Suspense>
+              }
+            >
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 <StatCard label="Questions tracked" value={fmt(data.questions.totalSlotsTracked)} icon={Sparkles} />
-                <StatCard label="Total attempts" value={fmt(data.questions.totalAttempts)} icon={Target} />
-                <StatCard label="Overall claim rate" value={pct(data.questions.overallClaimRate)} icon={Activity} />
+                <StatCard
+                  label="Total attempts"
+                  value={fmt(data.questions.totalAttempts)}
+                  icon={Target}
+                  hint={data.questions.excludeBots ? "Human submissions only" : "Humans + bots"}
+                />
+                <StatCard label="Success rate" value={pct(data.questions.overallClaimRate)} icon={Activity} hint="Successful snaps per attempt" />
               </div>
               <QuestionsTable
                 hardest={data.questions.hardest}
@@ -126,13 +145,13 @@ export default async function DashboardPage({
   )
 }
 
-async function loadAll(range?: string) {
+async function loadAll(range?: string, excludeBots = true) {
   const window = getWindow(range)
   const [users, retention, topics, questions] = await Promise.all([
     getUserMetrics(window),
     getRetentionMetrics(window),
     getTopicMetrics(window),
-    getQuestionMetrics(window),
+    getQuestionMetrics(window, excludeBots),
   ])
   return { users, retention, topics, questions }
 }
@@ -140,17 +159,22 @@ async function loadAll(range?: string) {
 function Section({
   title,
   description,
+  action,
   children,
 }: {
   title: string
   description: string
+  action?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
     <section className="flex flex-col gap-4">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-        <p className="text-sm text-muted-foreground">{description}</p>
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
+          <p className="text-sm text-muted-foreground">{description}</p>
+        </div>
+        {action}
       </div>
       {children}
     </section>
