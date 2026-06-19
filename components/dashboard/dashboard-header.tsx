@@ -11,7 +11,7 @@ export function DashboardHeader() {
             <BarChart3 className="h-5 w-5" aria-hidden="true" />
           </div>
           <div className="flex flex-col">
-            <span className="text-sm font-semibold leading-tight">Trivia Back Office</span>
+            <span className="text-sm font-semibold leading-tight">Cackle Back Office</span>
             <span className="text-xs text-muted-foreground">Player & game analytics</span>
           </div>
         </div>

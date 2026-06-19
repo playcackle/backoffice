@@ -19,7 +19,7 @@ export default function LoginPage() {
             <BarChart3 className="h-6 w-6" aria-hidden="true" />
           </div>
           <div className="space-y-1">
-            <CardTitle className="text-xl">Trivia Back Office</CardTitle>
+            <CardTitle className="text-xl">Cackle Back Office</CardTitle>
             <CardDescription>Enter the admin password to view analytics.</CardDescription>
           </div>
         </CardHeader>
