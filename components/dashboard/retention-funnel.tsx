@@ -55,7 +55,7 @@ export function RetentionFunnel({ data }: { data: RetentionMilestone[] }) {
               }
             />
             <Bar dataKey="rate" fill="var(--color-rate)" radius={[6, 6, 0, 0]}>
-              <LabelList dataKey="rate" position="top" formatter={(v: number) => `${v}%`} className="fill-foreground text-xs" />
+              <LabelList dataKey="rate" position="top" formatter={(v: unknown) => `${v}%`} className="fill-foreground text-xs" />
             </Bar>
           </BarChart>
         </ChartContainer>
