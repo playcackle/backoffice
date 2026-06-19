@@ -1,10 +1,19 @@
-import { Users, Activity, UserPlus, Repeat, Gamepad2, Target, CalendarClock, Sparkles } from "lucide-react"
-import { getUserMetrics, getRetentionMetrics, getQuestionMetrics } from "@/lib/analytics"
+import { Suspense } from "react"
+import { Users, Activity, UserPlus, Repeat, Gamepad2, Target, CalendarClock, Sparkles, Layers, Hash } from "lucide-react"
+import {
+  getUserMetrics,
+  getRetentionMetrics,
+  getQuestionMetrics,
+  getTopicMetrics,
+  getWindow,
+} from "@/lib/analytics"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
+import { DateRangeFilter } from "@/components/dashboard/date-range-filter"
 import { StatCard } from "@/components/dashboard/stat-card"
 import { UsersActivityChart } from "@/components/dashboard/users-activity-chart"
 import { EngagementChart } from "@/components/dashboard/engagement-chart"
 import { RoundsChart } from "@/components/dashboard/rounds-chart"
+import { TopicBreakdown } from "@/components/dashboard/topic-breakdown"
 import { QuestionsTable } from "@/components/dashboard/questions-table"
 import { Card, CardContent } from "@/components/ui/card"
 
@@ -22,12 +31,19 @@ function dec(n: number) {
   return n.toFixed(1)
 }
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ range?: string }>
+}) {
+  const { range } = await searchParams
+  const window = getWindow(range)
+
   let data: Awaited<ReturnType<typeof loadAll>> | null = null
   let error: string | null = null
 
   try {
-    data = await loadAll()
+    data = await loadAll(range)
   } catch (e) {
     error = e instanceof Error ? e.message : "Failed to load analytics."
   }
@@ -36,6 +52,16 @@ export default async function DashboardPage() {
     <div className="min-h-screen">
       <DashboardHeader />
       <main className="mx-auto max-w-7xl px-4 py-6 md:px-6 md:py-8">
+        <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight text-balance">Analytics overview</h1>
+            <p className="text-sm text-muted-foreground">Showing data for {window.label.toLowerCase()}</p>
+          </div>
+          <Suspense fallback={null}>
+            <DateRangeFilter value={window.preset} />
+          </Suspense>
+        </div>
+
         {error ? (
           <Card>
             <CardContent className="p-6">
@@ -48,9 +74,9 @@ export default async function DashboardPage() {
             <Section title="Players" description="Unique and active users across your trivia game">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <StatCard label="Total players" value={fmt(data.users.totalUsers)} icon={Users} hint={`${fmt(data.users.botCount)} bots excluded`} />
-                <StatCard label="Active today" value={fmt(data.users.dau)} icon={Activity} hint="Seen in last 24h" />
+                <StatCard label="Active in range" value={fmt(data.users.activeInRange)} icon={Activity} hint={`${fmt(data.users.dau)} active today`} />
+                <StatCard label="New in range" value={fmt(data.users.newInRange)} icon={UserPlus} hint={`${fmt(data.users.newToday)} joined today`} />
                 <StatCard label="Weekly active" value={fmt(data.users.wau)} icon={CalendarClock} hint="Seen in last 7 days" />
-                <StatCard label="New this week" value={fmt(data.users.newThisWeek)} icon={UserPlus} hint={`${fmt(data.users.newToday)} joined today`} />
               </div>
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <UsersActivityChart data={data.users.signupSeries} />
@@ -66,6 +92,15 @@ export default async function DashboardPage() {
                 <StatCard label="Monthly active" value={fmt(data.users.mau)} icon={Activity} hint="Seen in last 30 days" />
               </div>
               <EngagementChart data={data.retention.engagementBuckets} />
+            </Section>
+
+            <Section title="Topics" description="Which trivia topics players spend their rounds on">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <StatCard label="Topics played" value={fmt(data.topics.totalTopics)} icon={Layers} />
+                <StatCard label="Rounds in range" value={fmt(data.topics.totalRounds)} icon={Hash} />
+                <StatCard label="Top topic" value={data.topics.topTopic ?? "—"} icon={Sparkles} />
+              </div>
+              <TopicBreakdown topics={data.topics.topics} />
             </Section>
 
             <Section title="Question performance" description="Which questions challenge or stump your players">
@@ -87,13 +122,15 @@ export default async function DashboardPage() {
   )
 }
 
-async function loadAll() {
-  const [users, retention, questions] = await Promise.all([
-    getUserMetrics(),
-    getRetentionMetrics(),
-    getQuestionMetrics(),
+async function loadAll(range?: string) {
+  const window = getWindow(range)
+  const [users, retention, topics, questions] = await Promise.all([
+    getUserMetrics(window),
+    getRetentionMetrics(window),
+    getTopicMetrics(window),
+    getQuestionMetrics(window),
   ])
-  return { users, retention, questions }
+  return { users, retention, topics, questions }
 }
 
 function Section({

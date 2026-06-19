@@ -13,7 +13,7 @@ export function RoundsChart({ data }: { data: { date: string; rounds: number }[]
     <Card>
       <CardHeader>
         <CardTitle>Gameplay volume</CardTitle>
-        <CardDescription>Rounds played per day over the last 30 days</CardDescription>
+        <CardDescription>Rounds played over the selected range</CardDescription>
       </CardHeader>
       <CardContent>
         <ChartContainer config={config} className="h-[280px] w-full">

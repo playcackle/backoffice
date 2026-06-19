@@ -1,5 +1,6 @@
 import "server-only"
 import { fetchAll } from "@/lib/supabase/admin"
+import { resolveRange, type RangePreset } from "@/lib/date-range"
 
 type PlayerRow = {
   id: string
@@ -46,22 +47,89 @@ function dayKey(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10)
 }
 
-function emptyDayRange(days: number): { key: string; label: string }[] {
-  const out: { key: string; label: string }[] = []
-  const today = Date.now()
-  for (let i = days - 1; i >= 0; i--) {
-    const ms = today - i * DAY_MS
-    const key = dayKey(ms)
-    out.push({
-      key,
-      label: new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }),
-    })
+// A resolved time window. `startMs` is null for "all time".
+export type Window = { startMs: number | null; endMs: number; days: number; preset: RangePreset; label: string }
+
+export function getWindow(preset?: string | null): Window {
+  const { value, days, label } = resolveRange(preset)
+  const endMs = Date.now()
+  const startMs = days > 0 ? endMs - days * DAY_MS : null
+  return { startMs, endMs, days, preset: value, label }
+}
+
+function inWindow(ms: number | null, w: Window): boolean {
+  if (ms === null) return false
+  if (ms > w.endMs) return false
+  if (w.startMs !== null && ms < w.startMs) return false
+  return true
+}
+
+// Build time buckets spanning the window. Uses daily granularity for spans up
+// to ~13 weeks, otherwise weekly buckets to keep the series readable.
+type Buckets = {
+  keys: string[]
+  labels: Map<string, string>
+  keyFor: (ms: number) => string | null
+}
+
+function buildBuckets(w: Window, earliestMs: number): Buckets {
+  const start = w.startMs ?? Math.min(earliestMs, w.endMs)
+  const spanDays = Math.max(1, Math.ceil((w.endMs - start) / DAY_MS))
+  const weekly = spanDays > 92
+  const keys: string[] = []
+  const labels = new Map<string, string>()
+
+  if (weekly) {
+    // Anchor to the Monday on/before start.
+    const startDate = new Date(start)
+    const dow = (startDate.getUTCDay() + 6) % 7
+    let cursor = Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate() - dow)
+    while (cursor <= w.endMs) {
+      const key = dayKey(cursor)
+      keys.push(key)
+      labels.set(
+        key,
+        new Date(cursor).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }),
+      )
+      cursor += 7 * DAY_MS
+    }
+    return {
+      keys,
+      labels,
+      keyFor: (ms: number) => {
+        const d = new Date(ms)
+        const wd = (d.getUTCDay() + 6) % 7
+        const monday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - wd)
+        const key = dayKey(monday)
+        return labels.has(key) ? key : null
+      },
+    }
   }
-  return out
+
+  const startDay = Date.UTC(
+    new Date(start).getUTCFullYear(),
+    new Date(start).getUTCMonth(),
+    new Date(start).getUTCDate(),
+  )
+  for (let cursor = startDay; cursor <= w.endMs; cursor += DAY_MS) {
+    const key = dayKey(cursor)
+    keys.push(key)
+    labels.set(key, new Date(cursor).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }))
+  }
+  return {
+    keys,
+    labels,
+    keyFor: (ms: number) => {
+      const key = dayKey(ms)
+      return labels.has(key) ? key : null
+    },
+  }
 }
 
 export type UserMetrics = {
   totalUsers: number
+  newInRange: number
+  activeInRange: number
   dau: number
   wau: number
   mau: number
@@ -71,11 +139,8 @@ export type UserMetrics = {
   signupSeries: { date: string; signups: number; active: number }[]
 }
 
-export async function getUserMetrics(): Promise<UserMetrics> {
-  const players = await fetchAll<PlayerRow>(
-    "player",
-    "id,created_at,last_seen_active_at,is_bot",
-  )
+export async function getUserMetrics(w: Window): Promise<UserMetrics> {
+  const players = await fetchAll<PlayerRow>("player", "id,created_at,last_seen_active_at,is_bot")
   const humans = players.filter((p) => !p.is_bot)
   const now = Date.now()
 
@@ -84,11 +149,19 @@ export async function getUserMetrics(): Promise<UserMetrics> {
   let mau = 0
   let newToday = 0
   let newThisWeek = 0
+  let newInRange = 0
+  let activeInRange = 0
+  let totalUpToEnd = 0
 
+  let earliest = now
+  for (const p of humans) {
+    const created = parseTs(p.created_at)
+    if (created !== null && created < earliest) earliest = created
+  }
+
+  const buckets = buildBuckets(w, earliest)
   const signupMap = new Map<string, number>()
   const activeMap = new Map<string, number>()
-  const range = emptyDayRange(30)
-  const rangeKeys = new Set(range.map((r) => r.key))
 
   for (const p of humans) {
     const seen = parseTs(p.last_seen_active_at)
@@ -97,8 +170,11 @@ export async function getUserMetrics(): Promise<UserMetrics> {
       if (age <= DAY_MS) dau++
       if (age <= 7 * DAY_MS) wau++
       if (age <= 30 * DAY_MS) mau++
-      const k = dayKey(seen)
-      if (rangeKeys.has(k)) activeMap.set(k, (activeMap.get(k) ?? 0) + 1)
+      if (inWindow(seen, w)) {
+        activeInRange++
+        const k = buckets.keyFor(seen)
+        if (k) activeMap.set(k, (activeMap.get(k) ?? 0) + 1)
+      }
     }
 
     const created = parseTs(p.created_at)
@@ -106,23 +182,29 @@ export async function getUserMetrics(): Promise<UserMetrics> {
       const age = now - created
       if (age <= DAY_MS) newToday++
       if (age <= 7 * DAY_MS) newThisWeek++
-      const k = dayKey(created)
-      if (rangeKeys.has(k)) signupMap.set(k, (signupMap.get(k) ?? 0) + 1)
+      if (created <= w.endMs) totalUpToEnd++
+      if (inWindow(created, w)) {
+        newInRange++
+        const k = buckets.keyFor(created)
+        if (k) signupMap.set(k, (signupMap.get(k) ?? 0) + 1)
+      }
     }
   }
 
   return {
-    totalUsers: humans.length,
+    totalUsers: totalUpToEnd,
+    newInRange,
+    activeInRange,
     dau,
     wau,
     mau,
     newToday,
     newThisWeek,
     botCount: players.length - humans.length,
-    signupSeries: range.map((r) => ({
-      date: r.label,
-      signups: signupMap.get(r.key) ?? 0,
-      active: activeMap.get(r.key) ?? 0,
+    signupSeries: buckets.keys.map((k) => ({
+      date: buckets.labels.get(k) ?? k,
+      signups: signupMap.get(k) ?? 0,
+      active: activeMap.get(k) ?? 0,
     })),
   }
 }
@@ -137,7 +219,7 @@ export type RetentionMetrics = {
   roundsSeries: { date: string; rounds: number }[]
 }
 
-export async function getRetentionMetrics(): Promise<RetentionMetrics> {
+export async function getRetentionMetrics(w: Window): Promise<RetentionMetrics> {
   const players = await fetchAll<PlayerRow>(
     "player",
     "id,created_at,last_seen_active_at,games_played,rounds_played,total_slots_snapped,is_bot",
@@ -174,16 +256,20 @@ export async function getRetentionMetrics(): Promise<RetentionMetrics> {
 
   const count = humans.length || 1
 
-  // Rounds played per day over the last 30 days.
+  // Rounds played per bucket over the selected window.
   const rounds = await fetchAll<RoundRow>("roundanalytics", "id,created_at")
-  const range = emptyDayRange(30)
-  const rangeKeys = new Set(range.map((r) => r.key))
+  let earliest = w.endMs
+  for (const r of rounds) {
+    const ms = parseTs(r.created_at)
+    if (ms !== null && ms < earliest) earliest = ms
+  }
+  const timeBuckets = buildBuckets(w, earliest)
   const roundsMap = new Map<string, number>()
   for (const r of rounds) {
     const ms = parseTs(r.created_at)
-    if (ms === null) continue
-    const k = dayKey(ms)
-    if (rangeKeys.has(k)) roundsMap.set(k, (roundsMap.get(k) ?? 0) + 1)
+    if (!inWindow(ms, w)) continue
+    const k = timeBuckets.keyFor(ms as number)
+    if (k) roundsMap.set(k, (roundsMap.get(k) ?? 0) + 1)
   }
 
   return {
@@ -193,7 +279,60 @@ export async function getRetentionMetrics(): Promise<RetentionMetrics> {
     avgRoundsPlayed: totalRounds / count,
     avgSlotsSnapped: totalSnaps / count,
     engagementBuckets: buckets.map((b) => ({ label: b.label, players: b.players })),
-    roundsSeries: range.map((r) => ({ date: r.label, rounds: roundsMap.get(r.key) ?? 0 })),
+    roundsSeries: timeBuckets.keys.map((k) => ({ date: timeBuckets.labels.get(k) ?? k, rounds: roundsMap.get(k) ?? 0 })),
+  }
+}
+
+export type TopicStat = {
+  topic: string
+  category: string | null
+  rounds: number
+  sessions: number
+  share: number
+}
+
+export type TopicMetrics = {
+  totalTopics: number
+  totalRounds: number
+  topTopic: string | null
+  topics: TopicStat[]
+}
+
+export async function getTopicMetrics(w: Window): Promise<TopicMetrics> {
+  const rounds = await fetchAll<RoundRow>("roundanalytics", "id,created_at,topic_name,category_name,game_session_id")
+
+  type Agg = { topic: string; category: string | null; rounds: number; sessions: Set<string> }
+  const map = new Map<string, Agg>()
+  let totalRounds = 0
+
+  for (const r of rounds) {
+    const ms = parseTs(r.created_at)
+    if (!inWindow(ms, w)) continue
+    const topic = (r.topic_name ?? "").trim() || "Untitled topic"
+    const key = topic.toLowerCase()
+    const agg = map.get(key) ?? { topic, category: r.category_name ?? null, rounds: 0, sessions: new Set<string>() }
+    agg.rounds += 1
+    if (!agg.category && r.category_name) agg.category = r.category_name
+    if (r.game_session_id) agg.sessions.add(r.game_session_id)
+    map.set(key, agg)
+    totalRounds++
+  }
+
+  const topics: TopicStat[] = Array.from(map.values())
+    .map((a) => ({
+      topic: a.topic,
+      category: a.category,
+      rounds: a.rounds,
+      sessions: a.sessions.size,
+      share: totalRounds ? a.rounds / totalRounds : 0,
+    }))
+    .sort((a, b) => b.rounds - a.rounds)
+
+  return {
+    totalTopics: topics.length,
+    totalRounds,
+    topTopic: topics[0]?.topic ?? null,
+    topics: topics.slice(0, 12),
   }
 }
 
@@ -217,10 +356,10 @@ export type QuestionMetrics = {
   mostAttempted: QuestionStat[]
 }
 
-export async function getQuestionMetrics(): Promise<QuestionMetrics> {
+export async function getQuestionMetrics(w: Window): Promise<QuestionMetrics> {
   const rows = await fetchAll<SlotAnalyticsRow>(
     "slotanalytics",
-    "canonical_text,slot_id,is_rare,is_claimed,total_attempts,failed_attempts,unique_attemptors",
+    "canonical_text,slot_id,is_rare,is_claimed,total_attempts,failed_attempts,unique_attemptors,created_at",
   )
 
   type Agg = {
@@ -236,8 +375,13 @@ export async function getQuestionMetrics(): Promise<QuestionMetrics> {
 
   let totalAttempts = 0
   let totalClaimed = 0
+  let consideredRows = 0
 
   for (const r of rows) {
+    const ms = parseTs(r.created_at)
+    // Slot analytics rows carry a created_at; honor the window when present.
+    if (r.created_at && !inWindow(ms, w)) continue
+    consideredRows++
     const text = (r.canonical_text ?? "").trim() || `Slot #${r.slot_id ?? "?"}`
     const key = text.toLowerCase()
     const agg =
@@ -270,18 +414,14 @@ export async function getQuestionMetrics(): Promise<QuestionMetrics> {
   // Only rank questions that have been seen enough to be meaningful.
   const ranked = stats.filter((s) => s.appearances >= 3)
 
-  const hardest = [...ranked]
-    .sort((a, b) => b.failRate - a.failRate || b.attempts - a.attempts)
-    .slice(0, 10)
-  const easiest = [...ranked]
-    .sort((a, b) => b.claimRate - a.claimRate || a.failRate - b.failRate)
-    .slice(0, 10)
+  const hardest = [...ranked].sort((a, b) => b.failRate - a.failRate || b.attempts - a.attempts).slice(0, 10)
+  const easiest = [...ranked].sort((a, b) => b.claimRate - a.claimRate || a.failRate - b.failRate).slice(0, 10)
   const mostAttempted = [...stats].sort((a, b) => b.attempts - a.attempts).slice(0, 10)
 
   return {
     totalSlotsTracked: map.size,
     totalAttempts,
-    overallClaimRate: rows.length ? totalClaimed / rows.length : 0,
+    overallClaimRate: consideredRows ? totalClaimed / consideredRows : 0,
     hardest,
     easiest,
     mostAttempted,
